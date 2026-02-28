@@ -1,0 +1,12 @@
+<resources>
+    <style name="Theme.AndroidVoiceInteractiveApp" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/primary</item>
+        <item name="colorPrimaryVariant">@color/primary_dark</item>
+        <item name="colorOnPrimary">@color/text_white</item>
+        <item name="colorSecondary">@color/accent</item>
+        <item name="colorSecondaryVariant">@color/accent</item>
+        <item name="colorOnSecondary">@color/text_white</item>
+        <item name="android:statusBarColor">@color/nav_bar_bg</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>
