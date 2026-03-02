@@ -1,15 +1,21 @@
 package com.example.androidvoiceinteractiveapp
 
 import android.Manifest
+import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
+import android.media.MediaScannerConnection
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Process
+import android.provider.MediaStore
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -20,12 +26,19 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.createBitmap
 import com.example.androidvoiceinteractiveapp.databinding.ActivityYoloDemoBinding
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.pose.PoseDetection
 import com.google.mlkit.vision.pose.PoseDetector
 import com.google.mlkit.vision.pose.defaults.PoseDetectorOptions
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.io.OutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -65,6 +78,7 @@ class YoloDemoActivity : AppCompatActivity() {
 
         binding.btnBack.setOnClickListener { finish() }
         binding.btnSwitchModel.setOnClickListener { switchModel() }
+        binding.btnCapture.setOnClickListener { saveSnapshot() }
 
         cameraExecutor = Executors.newSingleThreadExecutor()
 
@@ -167,11 +181,11 @@ class YoloDemoActivity : AppCompatActivity() {
             poseDetector.process(inputImage)
                 .addOnSuccessListener { pose ->
                     binding.overlayView.update(detections, pose, rotated.width, rotated.height)
-                    updateInfoText("Objects: ${detections.size} | Pose: ${if (pose.allPoseLandmarks.isNotEmpty()) "Detected" else "None"}")
+                    updateInfoText(buildDetectionSummary(detections, if (pose.allPoseLandmarks.isNotEmpty()) "Detected" else "None"))
                 }
                 .addOnFailureListener {
                     binding.overlayView.update(detections, null, rotated.width, rotated.height)
-                    updateInfoText("Objects: ${detections.size} | Pose: Error")
+                    updateInfoText(buildDetectionSummary(detections, "Error"))
                 }
                 .addOnCompleteListener {
                     if (!rotated.isRecycled) {
@@ -219,6 +233,126 @@ class YoloDemoActivity : AppCompatActivity() {
         lastInfoLine = info
         val modelName = yoloDetector?.loadedModelName ?: selectedModelName
         binding.tvInfo.text = "Model: $modelName\n$info"
+    }
+
+    private fun buildDetectionSummary(detections: List<YoloV8Detector.Detection>, poseText: String): String {
+        val labels = detections
+            .groupingBy { it.className }
+            .eachCount()
+            .entries
+            .sortedByDescending { it.value }
+            .take(5)
+            .joinToString(", ") { (name, count) ->
+                if (count > 1) "$name x$count" else name
+            }
+            .ifBlank { "None" }
+        return "Objects: ${detections.size} | Seen: $labels | Pose: $poseText"
+    }
+
+    private fun saveSnapshot() {
+        val screenshot = buildSnapshotBitmap()
+        cameraExecutor.execute {
+            try {
+                val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                val fileName = "yolo_capture_$timestamp.png"
+                val savedPath = saveBitmapToGallery(fileName, screenshot)
+                runOnUiThread {
+                    Toast.makeText(this, "Saved to gallery: $savedPath", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                Log.e("YoloDemoActivity", "Save snapshot failed", e)
+                runOnUiThread {
+                    Toast.makeText(this, "Save snapshot failed: ${e.message ?: "Unknown error"}", Toast.LENGTH_LONG).show()
+                }
+            } finally {
+                if (!screenshot.isRecycled) {
+                    screenshot.recycle()
+                }
+            }
+        }
+    }
+
+    private fun buildSnapshotBitmap(): Bitmap {
+        val cameraBitmap = binding.previewView.bitmap
+            ?: throw IllegalStateException("Camera frame is not ready")
+        val overlayBitmap = createBitmap(
+            binding.overlayView.width.coerceAtLeast(1),
+            binding.overlayView.height.coerceAtLeast(1)
+        )
+        val overlayCanvas = Canvas(overlayBitmap)
+        binding.overlayView.draw(overlayCanvas)
+
+        val composed = createBitmap(cameraBitmap.width, cameraBitmap.height)
+        val canvas = Canvas(composed)
+        canvas.drawBitmap(cameraBitmap, 0f, 0f, null)
+        val overlayRect = Rect(0, 0, cameraBitmap.width, cameraBitmap.height)
+        canvas.drawBitmap(overlayBitmap, null, overlayRect, null)
+
+        if (!cameraBitmap.isRecycled) {
+            cameraBitmap.recycle()
+        }
+        if (!overlayBitmap.isRecycled) {
+            overlayBitmap.recycle()
+        }
+        return composed
+    }
+
+    private fun saveBitmapToGallery(fileName: String, bitmap: Bitmap): String {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            saveBitmapToMediaStore(fileName, bitmap)
+        } else {
+            saveBitmapToPublicPictures(fileName, bitmap)
+        }
+    }
+
+    private fun saveBitmapToMediaStore(fileName: String, bitmap: Bitmap): String {
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+            put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/YOLODemo")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+        val resolver = contentResolver
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            ?: throw IllegalStateException("MediaStore insert failed")
+        try {
+            resolver.openOutputStream(uri)?.use { stream ->
+                writeBitmap(bitmap, stream)
+            } ?: throw IllegalStateException("Open output stream failed")
+            values.clear()
+            values.put(MediaStore.Images.Media.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            return uri.toString()
+        } catch (e: Exception) {
+            resolver.delete(uri, null, null)
+            throw e
+        }
+    }
+
+    private fun saveBitmapToPublicPictures(fileName: String, bitmap: Bitmap): String {
+        val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+        val outputDir = File(picturesDir, "YOLODemo")
+        if (!outputDir.exists()) {
+            outputDir.mkdirs()
+        }
+        val output = File(outputDir, fileName)
+        FileOutputStream(output).use { stream ->
+            writeBitmap(bitmap, stream)
+        }
+        MediaScannerConnection.scanFile(
+            this,
+            arrayOf(output.absolutePath),
+            arrayOf("image/png"),
+            null
+        )
+        return output.absolutePath
+    }
+
+    private fun writeBitmap(bitmap: Bitmap, stream: OutputStream) {
+        if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
+            throw IllegalStateException("Bitmap compress failed")
+        }
+        stream.flush()
     }
 
     override fun onDestroy() {

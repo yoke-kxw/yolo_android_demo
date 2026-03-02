@@ -4,4 +4,5 @@
     <string name="yolo_info_idle">Objects: 0 | Pose: None</string>
     <string name="switch_to_yolov8">Use YOLOv8</string>
     <string name="switch_to_yolo26">Use YOLO26</string>
+    <string name="capture_frame">Capture</string>
 </resources>
